@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Paper book — live tape</title>
+  <style>
+    :root {
+      --bg: #0c0d10; --card: #16181d; --line: #2a2d34; --text: #e8eaed;
+      --muted: #9aa0a8; --good: #3dd68c; --bad: #ff6b6b; --paper: #f5c542;
+      --live: #5b9dff; --shadow: 0 10px 40px rgba(0,0,0,.35);
+      font-family: "Segoe UI", system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); min-height: 100vh; padding: 28px 20px 48px; }
+    .wrap { max-width: 980px; margin: 0 auto; }
+    header { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 22px; }
+    h1 { font-size: 1.35rem; font-weight: 650; margin: 0; }
+    .sub { color: var(--muted); font-size: .92rem; margin-top: 4px; }
+    .badges { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .badge { font-weight: 700; letter-spacing: .04em; font-size: .75rem; padding: 6px 10px; border-radius: 999px; }
+    .paper { background: #3a3210; color: var(--paper); border: 1px solid #6d5b18; }
+    .live { background: #10233a; color: var(--live); border: 1px solid #2a5a8a; }
+    .live.on { background: #0d2a18; color: var(--good); border-color: #1f6b44; }
+    .live.off { background: #2a1212; color: var(--bad); border-color: #6b1f1f; }
+    .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+    @media (min-width: 800px) {
+      .grid.four { grid-template-columns: repeat(4, 1fr); }
+      .grid.three { grid-template-columns: repeat(3, 1fr); }
+      .wide { grid-column: 1 / -1; }
+    }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; box-shadow: var(--shadow); }
+    .label { color: var(--muted); font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; }
+    .num { font-size: 1.7rem; font-weight: 700; margin-top: 6px; font-variant-numeric: tabular-nums; }
+    .hint { color: var(--muted); font-size: .85rem; margin-top: 6px; }
+    .up { color: var(--good); } .down { color: var(--bad); }
+    .flash { animation: flash .4s ease; }
+    @keyframes flash { from { background: #1d3a2a; } to { background: var(--card); } }
+    table { width: 100%; border-collapse: collapse; font-size: .9rem; margin-top: 10px; }
+    th { text-align: left; color: var(--muted); font-weight: 600; padding: 8px 6px; border-bottom: 1px solid var(--line); }
+    td { padding: 8px 6px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+    .empty { color: var(--muted); padding: 18px 0; }
+    canvas { width: 100%; height: 160px; display: block; margin-top: 10px; }
+    .bar-wrap { height: 10px; background: #22252b; border-radius: 99px; overflow: hidden; margin-top: 10px; }
+    .bar { height: 100%; background: var(--good); width: 0; }
+    .bar.warn { background: var(--paper); } .bar.danger { background: var(--bad); }
+    .tick { font-size: .8rem; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>Paper book</h1>
+        <div class="sub">$100 week sim · not real money · prices tick live from Kraken</div>
+      </div>
+      <div class="badges">
+        <div class="badge paper">PAPER</div>
+        <div class="badge live off" id="conn">CONNECTING</div>
+      </div>
+    </header>
+    <div class="grid three" id="tape"></div>
+    <div class="grid four" id="kpis" style="margin-top:14px"></div>
+    <div class="grid" style="margin-top:14px">
+      <div class="card wide">
+        <div class="label">Account over the week</div>
+        <canvas id="chart" width="900" height="160"></canvas>
+      </div>
+      <div class="card">
+        <div class="label">Open positions</div>
+        <div id="positions"></div>
+      </div>
+      <div class="card">
+        <div class="label">Trades</div>
+        <div id="trades"></div>
+      </div>
+    </div>
+  </div>
+  <script>
+    const PAIRS = [
+      { ws: "BTC/USD", key: "BTCUSD", label: "Bitcoin" },
+      { ws: "ETH/USD", key: "ETHUSD", label: "Ethereum" },
+      { ws: "SOL/USD", key: "SOLUSD", label: "Solana" }
+    ];
+    const live = {};
+    let book = window.FALLBACK;
+
+    function money(n) {
+      if (n == null || Number.isNaN(n)) return "—";
+      const sign = n < 0 ? "-" : "";
+      const abs = Math.abs(n);
+      const d = abs >= 1000 ? 2 : abs >= 1 ? 2 : 4;
+      return sign + "$" + abs.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+    }
+    function pct(n) { return (n >= 0 ? "+" : "") + n.toFixed(2) + "%"; }
+    function daysLeft(end) {
+      return Math.max(0, Math.ceil((new Date(end + "T23:59:59") - new Date()) / 86400000));
+    }
+    function normPair(p) {
+      return String(p || "").replace("/", "").replace("XBT", "BTC").toUpperCase();
+    }
+    function lastFor(pair) {
+      const k = normPair(pair);
+      const hit = Object.values(live).find(x => normPair(x.symbol) === k);
+      return hit ? hit.last : null;
+    }
+    function markedValue() {
+      let invested = 0;
+      (book.positions || []).forEach(p => {
+        const px = lastFor(p.pair);
+        const size = Number(p.size) || 0;
+        invested += px != null ? size * px : (Number(p.value) || 0);
+      });
+      const cash = Number(book.cash != null ? book.cash : book.current_value);
+      if (!(book.positions || []).length) return Number(book.current_value);
+      return cash + invested;
+    }
+
+    function renderTape() {
+      const el = document.getElementById("tape");
+      el.innerHTML = PAIRS.map(p => {
+        const t = live[p.ws];
+        const last = t ? t.last : null;
+        const ch = t && t.changePct != null ? t.changePct : null;
+        const cls = ch == null ? "" : ch >= 0 ? "up" : "down";
+        return `<div class="card" id="card-${p.key}">
+          <div class="label">${p.label}</div>
+          <div class="num ${cls}">${last == null ? "…" : money(last)}</div>
+          <div class="hint ${cls}">${ch == null ? "waiting on Kraken" : pct(ch) + " today"}
+            <span class="tick">${t && t.bid ? "bid " + money(t.bid) + " · ask " + money(t.ask) : ""}</span>
+          </div>
+        </div>`;
+      }).join("");
+    }
+
+    function renderBook() {
+      const value = markedValue();
+      const start = book.starting_balance;
+      const pnl = value - start;
+      const pnlPct = (pnl / start) * 100;
+      const towardBill = Math.max(0, pnl);
+      const billGap = book.hurdle_monthly - towardBill;
+      const peak = Math.max(book.peak_value || start, value);
+      const dd = ((peak - value) / peak) * 100;
+      const stopAt = peak * (1 - book.circuit_breaker_pct / 100);
+      const cls = pnl >= 0 ? "up" : "down";
+      const kpis = [
+        ["Account value", money(value), (book.positions || []).length ? "Marks to live Kraken prices" : "All cash. Value will not tick until we own something."],
+        ["Profit or loss", money(pnl) + "  " + pct(pnlPct), "Paper only. Not real money."],
+        ["Toward this month's " + book.hurdle_name + " bill", money(towardBill) + " of " + money(book.hurdle_monthly), billGap > 0 ? money(billGap) + " still needed" : "Bill covered on paper"],
+        ["Days left in this sim", String(daysLeft(book.sim_end)), book.sim_start + " → " + book.sim_end]
+      ];
+      document.getElementById("kpis").innerHTML = kpis.map(([l,n,h]) =>
+        `<div class="card"><div class="label">${l}</div><div class="num ${l.includes("Profit") ? cls : ""}">${n}</div><div class="hint">${h}</div></div>`
+      ).join("") + `<div class="card wide"><div class="label">Safety stop</div>
+         <div class="num">${money(value)} · stop if we fall to ${money(stopAt)}</div>
+         <div class="hint">If the account drops 25% from its high (${money(peak)}), we stop and talk. Drawdown now: ${dd.toFixed(1)}%.</div>
+         <div class="bar-wrap"><div class="bar ${dd>=20?"danger":dd>=10?"warn":""}" style="width:${Math.min(100, (dd/book.circuit_breaker_pct)*100)}%"></div></div>
+        </div>`;
+
+      const pos = document.getElementById("positions");
+      pos.innerHTML = (book.positions || []).length ? "<table><tr><th>Name</th><th>Size</th><th>Live price</th><th>Value</th></tr>" +
+        book.positions.map(p => {
+          const px = lastFor(p.pair);
+          const size = Number(p.size) || 0;
+          const val = px != null ? size * px : Number(p.value) || 0;
+          return `<tr><td>${p.pair}</td><td>${p.size}</td><td>${px == null ? "…" : money(px)}</td><td>${money(val)}</td></tr>`;
+        }).join("") + "</table>"
+        : "<div class='empty'>Nothing open. All $100 is sitting in cash. Live prices above still tick.</div>";
+
+      const tr = document.getElementById("trades");
+      tr.innerHTML = (book.trades || []).length ? "<table><tr><th>When</th><th>Side</th><th>Name</th><th>Size</th><th>Max loss</th></tr>" +
+        book.trades.map(t => `<tr><td>${t.time}</td><td>${t.side}</td><td>${t.pair}</td><td>${t.size}</td><td>${money(t.max_loss)}</td></tr>`).join("") + "</table>"
+        : "<div class='empty'>No trades yet. We only take a trade when the max we can lose is written down first.</div>";
+      draw(book.equity || [{date: book.sim_start, value: start}]);
+    }
+
+    function draw(eq) {
+      const c = document.getElementById("chart");
+      const x = c.getContext("2d");
+      const w = c.width, h = c.height;
+      x.clearRect(0,0,w,h);
+      const vals = eq.map(p => p.value);
+      const min = Math.min(90, ...vals) - 2, max = Math.max(110, ...vals) + 2;
+      x.strokeStyle = "#2a2d34"; x.beginPath(); x.moveTo(0,h/2); x.lineTo(w,h/2); x.stroke();
+      x.strokeStyle = "#3dd68c"; x.lineWidth = 2; x.beginPath();
+      eq.forEach((p,i) => {
+        const px = eq.length===1 ? 20 : (i/(eq.length-1))*(w-40)+20;
+        const py = h - ((p.value-min)/(max-min))*(h-24) - 12;
+        i ? x.lineTo(px,py) : x.moveTo(px,py);
+      });
+      x.stroke();
+      x.fillStyle = "#3dd68c";
+      eq.forEach((p,i) => {
+        const px = eq.length===1 ? 20 : (i/(eq.length-1))*(w-40)+20;
+        const py = h - ((p.value-min)/(max-min))*(h-24) - 12;
+        x.beginPath(); x.arc(px,py,4,0,Math.PI*2); x.fill();
+      });
+    }
+
+    function setConn(ok, text) {
+      const el = document.getElementById("conn");
+      el.textContent = text;
+      el.className = "badge live " + (ok ? "on" : "off");
+    }
+
+    function connectWs() {
+      let ws;
+      try { ws = new WebSocket("wss://ws.kraken.com/v2"); }
+      catch (e) { pollRest(); return; }
+      ws.onopen = () => {
+        setConn(true, "LIVE · KRAKEN");
+        ws.send(JSON.stringify({
+          method: "subscribe",
+          params: { channel: "ticker", symbol: PAIRS.map(p => p.ws) }
+        }));
+      };
+      ws.onmessage = (ev) => {
+        let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+        const rows = msg.data || [];
+        if (msg.channel !== "ticker" || !rows.length) return;
+        rows.forEach(d => {
+          live[d.symbol] = {
+            symbol: d.symbol,
+            last: Number(d.last),
+            bid: Number(d.bid),
+            ask: Number(d.ask),
+            changePct: d.change_pct != null ? Number(d.change_pct) : null
+          };
+        });
+        renderTape();
+        renderBook();
+      };
+      ws.onerror = () => setConn(false, "LIVE FEED ERROR");
+      ws.onclose = () => { setConn(false, "RECONNECTING"); setTimeout(connectWs, 1500); };
+    }
+
+    async function pollRest() {
+      setConn(true, "LIVE · POLL");
+      const map = { BTCUSD: "XBTUSD", ETHUSD: "ETHUSD", SOLUSD: "SOLUSD" };
+      async function tick() {
+        try {
+          const q = Object.values(map).join(",");
+          const res = await fetch("https://api.kraken.com/0/public/Ticker?pair=" + q);
+          const json = await res.json();
+          const result = json.result || {};
+          PAIRS.forEach(p => {
+            const row = result[map[p.key]] || result[p.ws] || result[p.key];
+            if (!row) return;
+            const last = Number(row.c && row.c[0]);
+            const open = Number(row.o);
+            live[p.ws] = {
+              symbol: p.ws, last, bid: Number(row.b && row.b[0]), ask: Number(row.a && row.a[0]),
+              changePct: open ? ((last - open) / open) * 100 : null
+            };
+          });
+          renderTape();
+          renderBook();
+        } catch (e) { setConn(false, "COULD NOT REACH KRAKEN"); }
+      }
+      tick();
+      setInterval(tick, 2000);
+    }
+
+    async function loadBook() {
+      try { book = await (await fetch("book.json", { cache: "no-store" })).json(); }
+      catch { book = window.FALLBACK; }
+      renderTape();
+      renderBook();
+    }
+
+    window.FALLBACK = {
+      mode:"paper", starting_balance:100, current_value:100, cash:100, invested:0,
+      hurdle_monthly:100, hurdle_name:"SuperGrok Plus", circuit_breaker_pct:25, peak_value:100,
+      sim_start:"2026-08-27", sim_end:"2026-09-03", positions:[], trades:[],
+      equity:[{date:"2026-08-27", value:100}]
+    };
+    loadBook();
+    connectWs();
+  </script>
+</body>
+</html>

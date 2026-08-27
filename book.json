@@ -1,0 +1,26 @@
+{
+  "title": "Paper book",
+  "mode": "paper",
+  "currency": "USD",
+  "starting_balance": 100,
+  "current_value": 100,
+  "cash": 100,
+  "invested": 0,
+  "unrealized_pnl": 0,
+  "realized_pnl": 0,
+  "total_trades": 0,
+  "open_orders": 0,
+  "fee_rate": 0.0026,
+  "hurdle_monthly": 100,
+  "hurdle_name": "SuperGrok Plus",
+  "circuit_breaker_pct": 25,
+  "peak_value": 100,
+  "sim_start": "2026-08-27",
+  "sim_end": "2026-09-03",
+  "updated_at": "2026-08-27T13:54:00-04:00",
+  "positions": [],
+  "trades": [],
+  "equity": [
+    {"date": "2026-08-27", "value": 100}
+  ]
+}
